@@ -69,15 +69,9 @@ def load_data(filename: str, default_feeder_limit=1, load_cp_data=True, load_fee
             slot, part = data['fdr'].split(' ')
             if slot[0] != 'F' and slot[0] != 'R':
                 continue
-            slot = 'A'
-            feeder_data = pd.concat([feeder_data, pd.DataFrame([slot, part, 1]).T])
+            feeder_data = pd.concat([feeder_data, pd.DataFrame([slot, part, 1], index=['slot', 'part', 'arg']).T])
 
         feeder_data.drop_duplicates(subset='slot', inplace=True, ignore_index=True)
-        # 随机移除部分已安装的供料器
-        if load_feeder_data == 2:
-            drop_index = random.sample(list(range(len(feeder_data))), len(feeder_data) // 2)
-            feeder_data.drop(index=drop_index, inplace=True)
-
         feeder_data.sort_values(by='slot', ascending=True, inplace=True, ignore_index=True)
 
     pcb_data = pcb_data.sort_values(by="x", ascending=False)
