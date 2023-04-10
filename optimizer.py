@@ -1,4 +1,5 @@
 import copy
+import gurobipy
 import math
 import random
 
@@ -68,14 +69,94 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
             if part == part_:
                 break
         assert idx != -1
-        part_feederbase[idx] = slot
-
-    weight_cycle, weight_nz_change, weight_pick = 2, 6, 1
+        part_feederbase[idx] = slot     # part index - slot
 
     r = 1
     I, J = len(cpidx_2_part.keys()), len(nzidx_2_nozzle.keys())
-    L = 2  # todo: how to deal with this hyper-parameter
     H = 6  # max head num
+
+    # === determine the hyper-parameter of L ===
+    # first phase: calculate the number of heads for each type of nozzle
+    nozzle_heads = defaultdict(int)
+    for nozzle in nozzle_list.keys():
+        nozzle_heads[nozzle] = 1
+
+    while sum(nozzle_heads.values()) != H:
+        max_cycle_nozzle = None
+
+        for nozzle, head_num in nozzle_heads.items():
+            if max_cycle_nozzle is None or nozzle_list[nozzle] / head_num > nozzle_list[max_cycle_nozzle] / \
+                    nozzle_heads[max_cycle_nozzle]:
+                max_cycle_nozzle = nozzle
+
+        assert max_cycle_nozzle is not None
+        nozzle_heads[max_cycle_nozzle] += 1
+
+    nozzle_comp_points = defaultdict(list)
+    for part, points in component_list.items():
+        idx = component_data[component_data['part'] == part].index.tolist()[0]
+        nozzle = component_data.loc[idx]['nz']
+        nozzle_comp_points[nozzle].append([part, points])
+
+    level = 1 if len(component_list) == 1 and len(component_list) % H == 0 else 2
+    part_assignment, cycle_assignment = [], []
+
+    def aux_func(info):
+        return max(map(lambda points: max([p[1] for p in points]), info))
+
+    def recursive_assign(assign_points, nozzle_compo_points, cur_level, total_level) -> int:
+        if cur_level > total_level:
+            def func(points): return map(lambda points: max([p[1] for p in points]), points)
+            return 0 if sum(func(nozzle_compo_points.values())) == 0 else 1
+
+        if assign_points <= 0:
+            if len(cycle_assignment) > 0:
+                return 1
+            return -1
+
+        nozzle_compo_points_cpy = copy.deepcopy(nozzle_compo_points)
+        part_cycle_assign = []
+        for nozzle, head in nozzle_heads.items():
+            while head:
+                min_idx = -1
+                for idx, (part, points) in enumerate(nozzle_compo_points_cpy[nozzle]):
+                    if points >= assign_points and (
+                            min_idx == -1 or points < nozzle_compo_points_cpy[nozzle][min_idx][1]):
+                        min_idx = idx
+                part_cycle_assign.append(-1 if min_idx == -1 else nozzle_compo_points_cpy[nozzle][min_idx][0])
+                if min_idx != -1:
+                    nozzle_compo_points_cpy[nozzle][min_idx][1] -= assign_points
+                head -= 1
+
+        part_assignment.append(part_cycle_assign)
+        cycle_assignment.append(assign_points)
+        res = recursive_assign(aux_func(nozzle_compo_points_cpy.values()), nozzle_compo_points_cpy,
+                               cur_level + 1, total_level)
+        if res == 0:
+            return 0
+
+        elif res == -1:
+            # 当前周期分配点数为0，仍无法完成分配
+            part_assignment.pop()
+            cycle_assignment.pop()
+
+            return recursive_assign(aux_func(nozzle_compo_points.values()), nozzle_compo_points, cur_level - 1,
+                                    total_level)
+
+        elif res == 1:
+            # 所有周期均已走完，但是还有剩余的点未分配完
+            part_assignment.pop()
+            cycle_assignment.pop()
+            return recursive_assign(assign_points - 1, nozzle_compo_points, cur_level, total_level)
+
+    # second phase: (greedy) recursive search to assign points for each cycle set and obtain an initial solution
+    while True:
+        if recursive_assign(max(component_list.values()), nozzle_comp_points, 1, level) == 0:
+            break
+        level += 1
+
+    weight_cycle, weight_nz_change, weight_pick = 2, 6, 1
+    L = len(cycle_assignment)
     S = r * I  # the available feeder num
     M = 1000  # a sufficient large number
     HC = [[0 for _ in range(J)] for _ in range(I)]
@@ -112,94 +193,44 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
     WL = mdl.addVars(list_range(L), vtype=GRB.INTEGER, ub=len(pcb_data) // H + 1)
     NC = mdl.addVars(list_range(H), vtype=GRB.INTEGER, ub=J)
 
-    # initial process for speed up the search process
+    T = mdl.addVars(list_range(L), vtype=GRB.BINARY)
+
     if initial:
-        # greedy heuristic initialization
-        component_point_list = []
-        for index, part in cpidx_2_part.items():
-            component_point_list.append([index, component_list[part]])
+        # initial some variables to speed up the search process
+        part_2_cpidx = defaultdict(int)
+        for idx, part in cpidx_2_part.items():
+            part_2_cpidx[part] = idx
 
-        # first phase: ensure that each head has work
-        while len(component_point_list) < H:
-            component_point_list = sorted(component_point_list, key=lambda x: x[1], reverse=False)
+        slot = 0
+        for part, _ in sorted(component_list.items(), key=lambda x: x[0]):
+            while slot in feeder_data.keys():
+                slot += 1       # skip assigned feeder slot
 
-            if component_point_list[-1][1] == 1:
-                break
+            if part_2_cpidx[part] in part_feederbase.keys():
+                continue
 
-            component_point_list.append(component_point_list[-1].copy())
-            component_point_list[-1][1] //= 2
-            component_point_list[-2][1] -= component_point_list[-1][1]
+            part_feederbase[part_2_cpidx[part]] = slot
+            slot += 1
 
-        nozzle_points_list = defaultdict(list)
-        for index, point in component_point_list:
-            cp_idx = component_data[component_data['part'] == cpidx_2_part[index]].index.tolist()[0]
-            nozzle = component_data.loc[cp_idx]['nz']
-            nozzle_points_list[nozzle].append([index, point])
-
-        for nozzle in nozzle_points_list.keys():
-            # sort with the number of placement points
-            nozzle_points_list[nozzle] = sorted(nozzle_points_list[nozzle], reverse=True, key=lambda x: x[1])
-
-        # second phase: assignment process - ensure that each head has work
-        cycle_idx, head_idx = 0, 0
-        component_assignment = [[] for _ in range(H)]
-        for nozzle, comp_point in nozzle_points_list.items():
-            component_assignment[head_idx] = comp_point[0]
-            nozzle_points_list[nozzle].pop(0)
-            head_idx += 1
-
-        while head_idx < H:
-            max_point_nozzle, max_points = None, 0
-            for nozzle, comp_point in nozzle_points_list.items():
-                if len(comp_point) != 0 and comp_point[0][1] > max_points:
-                    max_points, max_point_nozzle = comp_point[0][1], nozzle
-
-            assert max_point_nozzle is not None
-            component_assignment[head_idx] = nozzle_points_list[max_point_nozzle][0]
-            nozzle_points_list[max_point_nozzle].pop(0)
-            head_idx += 1
-
-        # third phase assignment: assign other component points and calculate the initial result
-        # condition1: all component points are assigned to the heads
-        # condition2: the final result is determined
-        while sum(map(len, nozzle_points_list.values())) != 0 or sum(map(lambda x: x[1], component_assignment)) != 0:
-            workload = M
-            for head_idx in range(H):
-                if component_assignment[head_idx][1] == 0:
+        cycle_index = sorted(range(len(cycle_assignment)), key=lambda k: cycle_assignment[k], reverse=True)
+        for idx, cycle in enumerate(cycle_index):
+            WL[idx].Start = cycle_assignment[cycle]
+            for h in range(H):
+                part = part_assignment[cycle][h]
+                if part == -1:
                     continue
-                workload = min(component_assignment[head_idx][1], workload)
-            assert workload != M
-
-            WL[cycle_idx].Start = workload
-            for head_idx in range(H):
-                if component_assignment[head_idx][1] != 0:
-                    cp_idx = component_assignment[head_idx][0]
-                    nz_idx = cpidx_2_nzidx[cp_idx]
-                    # nozzle_idx = component_data[]
-                    # the initial slot for component is same to its index
-                    x[cp_idx, cp_idx, head_idx, cycle_idx].Start = 1
-                    z[nz_idx, head_idx, cycle_idx].Start = 1
-
-                component_assignment[head_idx][1] -= workload
-
-            if sum(map(len, nozzle_points_list.values())) != 0:
-                while sum(map(lambda x: x[1], component_assignment)) != 0:
-                    max_point_nozzle, max_points = None, 0
-                    for nozzle, comp_point in nozzle_points_list.items():
-                        if len(comp_point) != 0 and comp_point[0][1] > max_points:
-                            max_points, max_point_nozzle = comp_point[0][1], nozzle
-
-                    assert max_point_nozzle is not None
-                    for head_idx in range(H):
-                        if component_assignment[head_idx][1] == 0:
-                            component_assignment[head_idx] = nozzle_points_list[max_point_nozzle][0]
-                            nozzle_points_list[max_point_nozzle].pop(0)
-                            break
+                slot = part_feederbase[part_2_cpidx[part]]
+                x[part_2_cpidx[part], slot, h, idx].Start = 1
+                if type(f[slot, part_2_cpidx[part]]) == gurobipy.Var:
+                    f[slot, part_2_cpidx[part]].Start = 1
 
     # === Objective ===
     mdl.modelSense = GRB.MINIMIZE
     mdl.setObjective(weight_cycle * quicksum(WL[l] for l in range(L)) + weight_nz_change * quicksum(
-        NC[h] for h in range(H)) + weight_pick * quicksum(PU[s, l] for s in range(-(H - 1) * r, S) for l in range(L)))
+        NC[h] for h in range(H)) + weight_pick * quicksum(PU[s, l] for s in range(-(H - 1) * r, S) for l in range(L))
+                     + 0.01 * quicksum(T[l] for l in range (L)))
+
+    mdl.addConstrs(WL[l] <= M * T[l] for l in range(L))
 
     # === Constraint ===
     # work completion
@@ -337,12 +368,11 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
     return mdl.objval if mdl.Status == GRB.OPTIMAL else 0, nozzle_assign, component_assign, feeder_assign
 
 
-@timer_wrapper
 def cal_individual_val(pcb_data, component_data, individual):
     feeder_data = defaultdict(int)
     for idx, slot in enumerate(individual):
         feeder_data[slot] = component_data.loc[idx]['part']
-    objval, _, _, feeder_assign = gurobi_optimizer(pcb_data, component_data, feeder_data, hinter=False)
+    objval, _, _, feeder_assign = gurobi_optimizer(pcb_data, component_data, feeder_data, initial=True, hinter=False)
 
     # 增加移动距离的约束
     pick_distance = 0
@@ -384,10 +414,10 @@ def swap_mutation(parent):
     return parent
 
 
-def get_top_k_value(pop_val, k: int):
+def get_top_k_value(pop_val, k: int, reverse=True):
     res = []
     pop_val_cpy = copy.deepcopy(pop_val)
-    pop_val_cpy.sort(reverse=True)
+    pop_val_cpy.sort(reverse=reverse)
 
     for i in range(min(len(pop_val_cpy), k)):
         for j in range(len(pop_val)):
@@ -448,20 +478,21 @@ def genetic_algorithm(pcb_data, component_data):
     # crossover rate & mutation rate: 80% & 10%
     # population size: 30
     # the number of generation: 100
-    crossover_rate, mutation_rate = 0.8, 0.1
-    population_size, n_generations = 20, 10
-
-    # initial solution
-    population = []
-    for _ in range(population_size):
-        pop_permutation = list_range(len(component_data))
-        random.shuffle(pop_permutation)
-        population.append(pop_permutation)
-    best_individual, best_pop_val = [], []
+    crossover_rate, mutation_rate = 0.6, 0.1
+    population_size, n_generations = 10, 200
 
     with tqdm(total=n_generations) as pbar:
         pbar.set_description('ILP genetic process')
 
+        # initial solution
+        population, pop_val = [], []
+        for _ in range(population_size):
+            pop_permutation = list_range(len(component_data))
+            random.shuffle(pop_permutation)
+            population.append(pop_permutation)
+            pop_val.append(cal_individual_val(pcb_data, component_data, pop_permutation))
+
+        best_individual, best_pop_val = [], []
         for _ in range(n_generations):
             # calculate fitness value
             pop_val = []
@@ -473,15 +504,15 @@ def genetic_algorithm(pcb_data, component_data):
 
             # min-max convert
             max_val = 1.5 * max(pop_val)
-            pop_val = list(map(lambda v: max_val - v, pop_val))
+            sel_pop_val = list(map(lambda v: max_val - v, pop_val))
 
             # crossover and mutation
-            new_population = []
+            new_population, new_pop_val = [], []
             for pop in range(population_size):
                 if pop % 2 == 0 and random.random() < crossover_rate:
-                    index1, index2 = roulette_wheel_selection(pop_val), -1
+                    index1, index2 = roulette_wheel_selection(sel_pop_val), -1
                     while True:
-                        index2 = roulette_wheel_selection(pop_val)
+                        index2 = roulette_wheel_selection(sel_pop_val)
                         if index1 != index2:
                             break
 
@@ -497,14 +528,19 @@ def genetic_algorithm(pcb_data, component_data):
                     new_population.append(offspring1)
                     new_population.append(offspring2)
 
+                    new_pop_val.append(cal_individual_val(pcb_data, component_data, offspring1))
+                    new_pop_val.append(cal_individual_val(pcb_data, component_data, offspring2))
+
             # selection
-            top_k_index = get_top_k_value(pop_val, population_size - len(new_population))
+            top_k_index = get_top_k_value(pop_val, population_size - len(new_population), reverse=False)
             for index in top_k_index:
                 new_population.append(population[index])
+                new_pop_val.append(pop_val[index])
 
-            population = new_population
+            population, pop_val = new_population, new_pop_val
             pbar.update(1)
 
+    print(best_pop_val)
     plt.plot(best_pop_val)
     plt.show()
 
@@ -533,16 +569,16 @@ def main():
     pcb_data, component_data, feeder_data = load_data(params.filename, default_feeder_limit=1,
                                                       cp_auto_register=params.auto_register)  # 加载PCB数据
     # 构造飞达数据
-    feeder_data = defaultdict(int)  # feeder arrangement slot-part
-    # random.seed(0)
+    # feeder_data = defaultdict(int)  # feeder arrangement slot-part
     #
     # feeder_test = list_range(len(component_data))
+    #
     # random.shuffle(feeder_test)
     # for idx, slot in enumerate(feeder_test):
     #     feeder_data[slot] = component_data.loc[idx]['part']
-
-    gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinter=True)
-    # genetic_algorithm(pcb_data, component_data)
+    #
+    # gurobi_optimizer(pcb_data, component_data, feeder_data, initial=True, hinter=True)
+    genetic_algorithm(pcb_data, component_data)
 
 
 if __name__ == '__main__':
