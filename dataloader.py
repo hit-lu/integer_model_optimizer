@@ -4,7 +4,7 @@ import pandas as pd
 from collections import defaultdict
 
 
-def load_data(filename: str, default_feeder_limit=1, load_cp_data=True, load_feeder_data=True, cp_auto_register=False):
+def load_data(filename: str, feeder_limit=1, load_cp_data=True, load_feeder_data=True, auto_register=False):
 
     # 读取PCB数据
     filename = 'data/' + filename
@@ -42,11 +42,11 @@ def load_data(filename: str, default_feeder_limit=1, load_cp_data=True, load_fee
         part, nozzle = data.part, data.nz.split(' ')[1]
         slot = data['fdr'].split(' ')[0]
         if part not in component_data['part'].values:
-            if not cp_auto_register:
+            if not auto_register:
                 raise Exception("unregistered component:  " + component_data['part'].values)
             else:
                 component_data = pd.concat([component_data, pd.DataFrame(
-                    [part, '', 'SM8', nozzle, '飞行相机1', 'CHIP-Rect', default_feeder_limit, 0], index=part_col).T],
+                    [part, '', 'SM8', nozzle, '飞行相机1', 'CHIP-Rect', feeder_limit, 0], index=part_col).T],
                                            ignore_index=True)
                 # warning_info = 'register component ' + part + ' with default feeder type'
                 # warnings.warn(warning_info, UserWarning)
@@ -74,5 +74,5 @@ def load_data(filename: str, default_feeder_limit=1, load_cp_data=True, load_fee
         feeder_data.drop_duplicates(subset='slot', inplace=True, ignore_index=True)
         feeder_data.sort_values(by='slot', ascending=True, inplace=True, ignore_index=True)
 
-    pcb_data = pcb_data.sort_values(by="x", ascending=False)
+    # pcb_data = pcb_data.sort_values(by="x", ascending=False)
     return pcb_data, component_data, feeder_data
