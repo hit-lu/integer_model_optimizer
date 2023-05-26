@@ -31,13 +31,12 @@ def load_data(filename: str, feeder_limit=1, load_cp_data=True, load_feeder_data
     part_col = ["part", "desc", "fdr", "nz", 'camera', 'group', 'feeder-limit', 'points']
     try:
         if load_cp_data:
-            component_data = pd.DataFrame(pd.read_csv(filepath_or_buffer='component.txt', sep='\t', header=None),
-                                          columns=part_col)
+            component_data = pd.DataFrame(pd.read_csv(filepath_or_buffer='component.txt', sep='\t', header=None))
         else:
-            component_data = pd.DataFrame(columns=part_col)
+            component_data = pd.DataFrame()
     except:
-        component_data = pd.DataFrame(columns=part_col)
-
+        component_data = pd.DataFrame()
+    component_data.columns = part_col
     for _, data in pcb_data.iterrows():
         part, nozzle = data.part, data.nz.split(' ')[1]
         slot = data['fdr'].split(' ')[0]
@@ -63,16 +62,16 @@ def load_data(filename: str, feeder_limit=1, load_cp_data=True, load_feeder_data
             component_data.at[idx, 'fdr'] = data['fdr'][0:2] + data['fdr'][3:]
 
     # 读取供料器基座数据
-    feeder_data = pd.DataFrame(columns=['slot', 'part', 'arg'])      # arg表示是否为预分配，不表示分配数目
-    if load_feeder_data:
-        for _, data in pcb_data.iterrows():
-            slot, part = data['fdr'].split(' ')
-            if slot[0] != 'F' and slot[0] != 'R':
-                continue
-            feeder_data = pd.concat([feeder_data, pd.DataFrame([slot, part, 1], index=['slot', 'part', 'arg']).T])
-
-        feeder_data.drop_duplicates(subset='slot', inplace=True, ignore_index=True)
-        feeder_data.sort_values(by='slot', ascending=True, inplace=True, ignore_index=True)
+    # feeder_data = pd.DataFrame(columns=['slot', 'part', 'arg'])      # arg表示是否为预分配，不表示分配数目
+    # if load_feeder_data:
+    #     for _, data in pcb_data.iterrows():
+    #         slot, part = data['fdr'].split(' ')
+    #         if slot[0] != 'F' and slot[0] != 'R':
+    #             continue
+    #         feeder_data = pd.concat([feeder_data, pd.DataFrame([slot, part, 1], index=['slot', 'part', 'arg']).T])
+    #
+    #     feeder_data.drop_duplicates(subset='slot', inplace=True, ignore_index=True)
+    #     feeder_data.sort_values(by='slot', ascending=True, inplace=True, ignore_index=True)
 
     # pcb_data = pcb_data.sort_values(by="x", ascending=False)
-    return pcb_data, component_data, feeder_data
+    return pcb_data, component_data

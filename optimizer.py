@@ -365,44 +365,32 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
     mdl.optimize()
 
     # === result generation ===
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.max_rows', None)
-    columns = ['H{}'.format(i + 1) for i in range(max_head_index)] + ['cycle']
-
-    nozzle_assign = pd.DataFrame(columns=columns)
-    component_assign = pd.DataFrame(columns=columns)
-    feeder_assign = pd.DataFrame(columns=columns)
+    nozzle_assign, component_assign = [], []
+    feeder_assign, cycle_assign = [], []
 
     if mdl.Status == GRB.OPTIMAL or mdl.Status == GRB.INTERRUPTED or GRB.TIME_LIMIT:
         for l in range(L):
             if abs(WL[l].x) <= 1e-10:
                 continue
 
-            nozzle_assign.loc[l, 'cycle'] = WL[l].x
-            component_assign.loc[l, 'cycle'] = WL[l].x
-            feeder_assign.loc[l, 'cycle'] = WL[l].x
+            nozzle_assign.append([-1 for _ in range(max_head_index)])
+            component_assign.append([-1 for _ in range(max_head_index)])
+            feeder_assign.append([-1 for _ in range(max_head_index)])
+            cycle_assign.append(int(WL[l].x))
 
             for h in range(max_head_index):
-                assigned = False
                 for i in range(I):
                     if abs(y[i, h, l].x - 1) < 1e-10:
                         assigned = True
-                        component_assign.loc[l, 'H{}'.format(h + 1)] = cpidx_2_part[i]
-                        # component_assign.loc[l, 'H{}'.format(h + 1)] = 'CP' + str(i)
-                        # feeder_assign.loc[l, 'H{}'.format(h + 1)] = 'F' + str(s + 1)
+                        component_assign[-1][h] = i
 
                         for j in range(J):
                             if HC[i][j]:
-                                nozzle_assign.loc[l, 'H{}'.format(h + 1)] = nzidx_2_nozzle[j]
+                                nozzle_assign[-1][h] = j
 
                 for s in range(S):
                     if abs(w[s, h, l].x - 1) < 1e-10:
-                        feeder_assign.loc[l, 'H{}'.format(h + 1)] = 'F' + str(s + 1)
-
-                if not assigned:
-                    nozzle_assign.loc[l, 'H{}'.format(h + 1)] = ''
-                    component_assign.loc[l, 'H{}'.format(h + 1)] = ''
-                    feeder_assign.loc[l, 'H{}'.format(h + 1)] = ''
+                        feeder_assign[-1][h] = s
 
         if hinter:
             print('total cost = {}'.format(mdl.objval))
@@ -419,32 +407,9 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
             print(nozzle_assign)
             print(component_assign)
             print(feeder_assign)
+            print(cycle_assign)
 
-    return mdl, nozzle_assign, component_assign, feeder_assign
-
-
-def cal_individual_val(pcb_data, component_data, individual):
-    feeder_data = defaultdict(int)
-    for idx, slot in enumerate(individual):
-        feeder_data[slot] = component_data.loc[idx]['part']
-    mdl, _, _, feeder_assign = gurobi_optimizer(pcb_data, component_data, feeder_data, initial=True, hinter=False)
-
-    # 增加移动距离的约束
-    pick_distance = 0
-    for _, data in feeder_assign.iterrows():
-        slot_list = []
-        for h in range(6):
-            if data['H' + str(h + 1)] == '':
-                continue
-            slot = int(data['H' + str(h + 1)][1:]) - h
-            slot_list.append(slot)
-
-        sorted(slot_list)
-        for idx in range(len(slot_list) - 1):
-            pick_distance += abs(slot_list[idx + 1] - slot_list[idx])
-        pick_distance *= data['cycle']
-
-    return mdl.objval + 0.1 * pick_distance if mdl.Status == GRB.OPTIMAL else 0
+    return mdl, component_assign, feeder_assign, cycle_assign
 
 
 def roulette_wheel_selection(pop_eval):
@@ -463,169 +428,19 @@ def roulette_wheel_selection(pop_eval):
     return index
 
 
-def swap_mutation(parent):
-    range_ = np.random.randint(0, len(parent), 2)
-    parent[range_[0]], parent[range_[1]] = parent[range_[1]], parent[range_[0]]
-    return parent
-
-
-def get_top_k_value(pop_val, k: int, reverse=True):
-    res = []
-    pop_val_cpy = copy.deepcopy(pop_val)
-    pop_val_cpy.sort(reverse=reverse)
-
-    for i in range(min(len(pop_val_cpy), k)):
-        for j in range(len(pop_val)):
-            if abs(pop_val_cpy[i] - pop_val[j]) < 1e-9 and j not in res:
-                res.append(j)
-                break
-    return res
-
-
-def partially_mapped_crossover(parent1, parent2):
-    range_ = np.random.randint(0, len(parent1), 2)  # 前闭后开
-    range_ = sorted(range_)
-
-    parent1_cpy, parent2_cpy = [-1 for _ in range(len(parent1))], [-1 for _ in range(len(parent2))]
-
-    parent1_cpy[range_[0]: range_[1] + 1] = copy.deepcopy(parent2[range_[0]: range_[1] + 1])
-    parent2_cpy[range_[0]: range_[1] + 1] = copy.deepcopy(parent1[range_[0]: range_[1] + 1])
-
-    for index in range(len(parent1)):
-        if range_[0] <= index <= range_[1]:
-            continue
-
-        cur_ptr, cur_elem = 0, parent1[index]
-        while True:
-            parent1_cpy[index] = cur_elem
-            if parent1_cpy.count(cur_elem) == 1:
-                break
-            parent1_cpy[index] = -1
-
-            if cur_ptr == 0:
-                cur_ptr, cur_elem = 1, parent2[index]
-            else:
-                index_ = parent1_cpy.index(cur_elem)
-                cur_elem = parent2[index_]
-
-    for index in range(len(parent2)):
-        if range_[0] <= index <= range_[1]:
-            continue
-
-        cur_ptr, cur_elem = 0, parent2[index]
-        while True:
-            parent2_cpy[index] = cur_elem
-            if parent2_cpy.count(cur_elem) == 1:
-                break
-            parent2_cpy[index] = -1
-
-            if cur_ptr == 0:
-                cur_ptr, cur_elem = 1, parent1[index]
-            else:
-                index_ = parent2_cpy.index(cur_elem)
-                cur_elem = parent1[index_]
-
-    return parent1_cpy, parent2_cpy
-
-
-def genetic_algorithm(pcb_data, component_data):
-    # basic parameter
-    # crossover rate & mutation rate: 80% & 10%
-    # population size: 30
-    # the number of generation: 100
-    crossover_rate, mutation_rate = 0.6, 0.1
-    population_size, n_generations = 20, 50
-    with tqdm(total=n_generations) as pbar:
-        pbar.set_description('ILP genetic process')
-
-        # initial solution
-        population, pop_val = [], []
-        for _ in range(population_size):
-            pop_permutation = list_range(len(component_data))
-            random.shuffle(pop_permutation)
-            population.append(pop_permutation)
-
-            # calculate fitness value
-            pop_val.append(cal_individual_val(pcb_data, component_data, pop_permutation))
-
-        best_pop_val = []
-        for _ in range(n_generations):
-            best_pop_val.append(min(pop_val))
-
-            print(best_pop_val[-1])
-            # min-max convert
-            max_val = 1.5 * max(pop_val)
-            sel_pop_val = list(map(lambda v: max_val - v, pop_val))
-
-            # crossover and mutation
-            new_population, new_pop_val = [], []
-            for pop in range(population_size):
-                if pop % 2 == 0 and random.random() < crossover_rate:
-                    index1, index2 = roulette_wheel_selection(sel_pop_val), -1
-                    while True:
-                        index2 = roulette_wheel_selection(sel_pop_val)
-                        if index1 != index2:
-                            break
-
-                    # 两点交叉算子
-                    offspring1, offspring2 = partially_mapped_crossover(population[index1], population[index2])
-
-                    if np.random.random() < mutation_rate:
-                        swap_mutation(offspring1)
-
-                    if np.random.random() < mutation_rate:
-                        swap_mutation(offspring2)
-
-                    new_population.append(offspring1)
-                    new_population.append(offspring2)
-
-                    new_pop_val.append(cal_individual_val(pcb_data, component_data, offspring1))
-                    new_pop_val.append(cal_individual_val(pcb_data, component_data, offspring2))
-
-            # selection
-            top_k_index = get_top_k_value(pop_val, population_size - len(new_population), reverse=False)
-            for index in top_k_index:
-                new_population.append(population[index])
-                new_pop_val.append(pop_val[index])
-
-            population, pop_val = new_population, new_pop_val
-            pbar.update(1)
-
-    print(best_pop_val)
-    plt.plot(best_pop_val)
-    plt.show()
-
-    feeder_data = defaultdict(int)
-    best_individual = population[np.argmin(pop_val)]
-    for idx, slot in enumerate(best_individual):
-        feeder_data[slot] = component_data.loc[idx]['part']
-
-    _, nozzle_assign, component_assign, feeder_assign = gurobi_optimizer(pcb_data, component_data, feeder_data,
-                                                                         hinter=True)
-
-    return nozzle_assign, component_assign, feeder_assign
-
-
-def dynamic_programming_cycle_path(pcb_data, cycle_placement, assigned_feeder):
+def dynamic_programming_cycle_path(mount_point_pos, cycle_placement):
     head_sequence = []
     num_pos = sum([placement != -1 for placement in cycle_placement]) + 1
 
     pos, head_set = [], []
-    feeder_set = set()
-    for head, feeder in enumerate(assigned_feeder):
-        if feeder is None or cycle_placement[head] == -1:
+    for head, feeder in enumerate(cycle_placement):
+        if cycle_placement[head] == -1:
             continue
 
         head_set.append(head)
         placement = cycle_placement[head]
+        pos.append([mount_point_pos[placement][0] - head * head_interval, mount_point_pos[placement][1]])
 
-        pos.append([pcb_data.loc[placement]['x'] - head * head_interval + stopper_pos[0],
-                    pcb_data.loc[placement]['y'] + stopper_pos[1]])
-
-        feeder_set.add(feeder - head * 1)   # todo: ratio 暂时设为1
-    # todo: 供料器位置未确定 此处取平均值临时代替
-    # pos.insert(0, [slotf1_pos[0] + ((min(list(feeder_set)) + max(list(feeder_set))) / 2 - 1) * slot_interval,
-    #                slotf1_pos[1]])
     pos.insert(0, [sum(map(lambda x: x[0], pos)) / len(pos), slotf1_pos[1]])
 
     def get_distance(pos_1, pos_2):
@@ -674,531 +489,450 @@ def dynamic_programming_cycle_path(pcb_data, cycle_placement, assigned_feeder):
         head_sequence.append(head_set[parent - 1])
 
     start_head, end_head = head_sequence[0], head_sequence[-1]
-    if pcb_data.loc[cycle_placement[start_head]]['x'] - start_head * head_interval > \
-            pcb_data.loc[cycle_placement[end_head]]['x'] - end_head * head_interval:
+    if mount_point_pos[cycle_placement[start_head]][0] - start_head * head_interval > \
+            mount_point_pos[cycle_placement[end_head]][0] - end_head * head_interval:
         head_sequence = list(reversed(head_sequence))
-    return head_sequence
+    return ans_dist, head_sequence
 
 
-def greedy_placement_route_generation(component_data, pcb_data, component_assign, feeder_slot_assign):
+@timer_wrapper
+def greedy_placement_route_generation(component_data, pcb_data, component_result, feeder_slot_result, cycle_result):
     placement_result, head_sequence_result = [], []
-    mount_point_index = [[] for _ in range(len(component_data))]
-    mount_point_pos = [[] for _ in range(len(component_data))]
+    mount_point_index, mount_point_pos = [], []
+    mount_point_part = []
+
     for i in range(len(pcb_data)):
         part = pcb_data.loc[i]['part']
         component_index = component_data[component_data['part'] == part].index.tolist()[0]
         # 记录贴装点序号索引和对应的位置坐标
-        mount_point_index[component_index].append(i)
-        mount_point_pos[component_index].append([pcb_data.loc[i]['x'], pcb_data.loc[i]['y']])
+        mount_point_index.append(i)
+        mount_point_pos.append([pcb_data.loc[i]['x'] + stopper_pos[0], pcb_data.loc[i]['y'] + stopper_pos[1]])
+        mount_point_part.append(component_index)
 
-    search_dir = 1  # 0：自左向右搜索  1：自右向左搜索
-    for cycle_index, component_cycle in component_assign.iterrows():
-        for _ in range(int(component_cycle['cycle'])):
-            # search_dir = 1 - search_dir
+    for cycle_index in range(len(component_result)):
+        floor_cycle, ceil_cycle = sum(cycle_result[:cycle_index]), sum(cycle_result[:(cycle_index + 1)])
+        for cycle in range(floor_cycle, ceil_cycle):
             assigned_placement = [-1] * max_head_index
-            max_pos = [max(mount_point_pos[component_index], key=lambda x: x[0]) for component_index in
-                       range(len(mount_point_pos)) if len(mount_point_pos[component_index]) > 0][0][0]
-            min_pos = [min(mount_point_pos[component_index], key=lambda x: x[0]) for component_index in
-                       range(len(mount_point_pos)) if len(mount_point_pos[component_index]) > 0][0][0]
-            point2head_range = min(math.floor((max_pos - min_pos) / head_interval) + 1, max_head_index)
 
-            # 最近邻确定
             way_point = None
-            head_range = range(max_head_index - 1, -1, -1) if search_dir else range(max_head_index)
-            for head_counter, head in enumerate(head_range):
-                part = component_cycle['H' + str(head + 1)]
-                if part == '':
+            for point_index in mount_point_index:
+                if way_point is None or way_point[0] > mount_point_pos[point_index][0]:
+                    way_point = mount_point_pos[point_index]
+
+            for _ in range(max_head_index):
+                next_head, next_point = -1, -1
+                min_cheby_distance = None
+                for head in range(max_head_index):
+                    if assigned_placement[head] != -1 or component_result[cycle_index][head] == -1:
+                        continue
+                    component_index = component_result[cycle_index][head]
+                    for point_index in mount_point_index:
+                        if mount_point_part[point_index] != component_index:
+                            continue
+                        delta_x = abs(mount_point_pos[point_index][0] - way_point[0] - head * head_interval)
+                        delta_y = abs(mount_point_pos[point_index][1] - way_point[1])
+
+                        cheby_distance = max(delta_x, delta_y)
+                        if min_cheby_distance is None or cheby_distance < min_cheby_distance:
+                            min_cheby_distance = cheby_distance
+                            next_head, next_point = head, point_index
+
+                if next_point == -1:
                     continue
 
-                component_index = component_data[component_data['part'] == part].index.tolist()[0]
-                if way_point is None or head_counter % point2head_range == 0:
-                    index = 0
-                    if way_point is None:
-                        if search_dir:
-                            index = np.argmax(mount_point_pos[component_index], axis=0)[0]
-                        else:
-                            index = np.argmin(mount_point_pos[component_index], axis=0)[0]
-                    else:
-                        for next_head in head_range:
-                            part = component_cycle['H' + str(next_head + 1)]
-                            if assigned_placement[next_head] == -1 and part != '':
-                                component_index = component_data[component_data['part'] == part].index.tolist()[0]
-                                num_points = len(mount_point_pos[component_index])
-                                index = np.argmin(
-                                    [abs(mount_point_pos[component_index][i][0] - way_point[0]) * .1 + abs(
-                                        mount_point_pos[component_index][i][1] - way_point[1]) for i in
-                                     range(num_points)])
-                                head = next_head
-                                break
-                    # index = np.argmax(mount_point_pos[component_index], axis=0)[0]
-                    assigned_placement[head] = mount_point_index[component_index][index]
+                assigned_placement[next_head] = next_point
 
-                    # 记录路标点
-                    way_point = mount_point_pos[component_index][index]
-                    way_point[0] += (max_head_index - head - 1) * head_interval if search_dir else -head * head_interval
+                way_point = mount_point_pos[next_point]
+                way_point[0] -= next_head * head_interval
 
-                    mount_point_index[component_index].pop(index)
-                    mount_point_pos[component_index].pop(index)
-
-                else:
-                    head_index, point_index = -1, -1
-                    min_cheby_distance, min_euler_distance = float('inf'), float('inf')
-                    for next_head in range(max_head_index):
-                        part = component_cycle['H' + str(next_head + 1)]
-                        if assigned_placement[next_head] != -1 or part == '':
-                            continue
-                        next_comp_index = component_data[component_data['part'] == part].index.tolist()[0]
-                        for counter in range(len(mount_point_pos[next_comp_index])):
-                            if search_dir:
-                                delta_x = abs(mount_point_pos[next_comp_index][counter][0] - way_point[0]
-                                              + (max_head_index - next_head - 1) * head_interval)
-                            else:
-                                delta_x = abs(mount_point_pos[next_comp_index][counter][0] - way_point[0]
-                                              - next_head * head_interval)
-
-                            delta_y = abs(mount_point_pos[next_comp_index][counter][1] - way_point[1])
-
-                            euler_distance = pow(axis_moving_time(delta_x, 0), 2) + pow(axis_moving_time(delta_y, 1), 2)
-                            cheby_distance = max(axis_moving_time(delta_x, 0),
-                                                 axis_moving_time(delta_y, 1)) + 5e-2 * euler_distance
-                            if cheby_distance < min_cheby_distance or (abs(cheby_distance - min_cheby_distance) < 1e-9
-                                                                       and euler_distance < min_euler_distance):
-                                # if euler_distance < min_euler_distance:
-                                min_cheby_distance, min_euler_distance = cheby_distance, euler_distance
-                                head_index, point_index = next_head, counter
-
-                    part = component_cycle['H' + str(head_index + 1)]
-                    component_index = component_data[component_data['part'] == part].index.tolist()[0]
-                    assert (0 <= head_index < max_head_index)
-
-                    assigned_placement[head_index] = mount_point_index[component_index][point_index]
-                    way_point = mount_point_pos[component_index][point_index]
-                    way_point[0] += (max_head_index - head_index - 1) * head_interval if search_dir \
-                        else -head_index * head_interval
-
-                    mount_point_index[component_index].pop(point_index)
-                    mount_point_pos[component_index].pop(point_index)
+                mount_point_index.remove(next_point)
 
             placement_result.append(assigned_placement)  # 各个头上贴装的元件类型
-            feeder_slot = []
-            for head in range(max_head_index):
-                slot = feeder_slot_assign.loc[cycle_index]['H' + str(head + 1)]
-                feeder_slot.append(None if slot == '' else int(slot[1:]) - head * 1)  # todo: 此处暂时设为1，未做兼容处理
-            head_sequence_result.append(dynamic_programming_cycle_path(pcb_data, assigned_placement, feeder_slot))
+            _, head_seq = dynamic_programming_cycle_path(mount_point_pos, assigned_placement)
+            head_sequence_result.append(head_seq)
 
     return placement_result, head_sequence_result
 
 
-def eular(posA, posB, interval=0):
-    return math.sqrt(pow(posA[0] - posB[0] - interval, 2) + pow(posA[1] - posB[1], 2))
+@timer_wrapper
+def scan_based_placement_route_generation(component_data, pcb_data, component_assign, feeder_assign, cycle_assign):
+    placement_result, head_sequence_result = [], []
 
+    for row, feeders in enumerate(feeder_assign):
+        for col, feeder in enumerate(feeders):
+            if feeder == -1:
+                continue
+            feeder_assign[row][col] = 40
 
-def cheby(posA, posB, interval=0):
-    return max(abs(posA[0] - posB[0] - interval), abs(posA[1] - posB[1]))
-
-
-def cal_individual_route_val(pcb_data, component_data, individual):
-    mount_point_index = [[] for _ in range(len(component_data))]
-    mount_point_pos = [[] for _ in range(len(component_data))]
+    mount_point_pos, mount_point_index, mount_point_part = [], [], []
     for i in range(len(pcb_data)):
         part = pcb_data.loc[i]['part']
         component_index = component_data[component_data['part'] == part].index.tolist()[0]
         # 记录贴装点序号索引和对应的位置坐标
-        mount_point_index[component_index].append(i)
-        mount_point_pos[component_index].append([pcb_data.loc[i]['x'], pcb_data.loc[i]['y']])
+        mount_point_index.append(i)
+        mount_point_pos.append([pcb_data.loc[i]['x'] + stopper_pos[0], pcb_data.loc[i]['y'] + stopper_pos[1]])
 
-    point_head = {}
-    for idx, i in enumerate(individual):
-        if idx < 4:
-            point_head[i] = 0
-        elif idx < 8:
-            point_head[i] = 1
-        elif idx < 11:
-            point_head[i] = 2
-        elif idx < 14:
-            point_head[i] = 3
-        elif idx < 17:
-            point_head[i] = 4
+        mount_point_part.append(component_index)
+
+    lBoundary, rBoundary = min(mount_point_pos, key=lambda x: x[0])[0], max(mount_point_pos, key=lambda x: x[0])[0]
+    search_step = max((rBoundary - lBoundary) / max_head_index / 2, 10)
+
+    min_dist = None
+    for search_dir in range(3):
+        if search_dir == 0:
+            # 从中间向两边搜索
+            searchPoints = np.arange((3 * lBoundary + rBoundary) / 4, (3 * rBoundary + lBoundary) / 4, search_step)
+            head_range, head_index = [], (max_head_index - 1) // 2
+            while head_index >= 0:
+                if 2 * head_index != max_head_index - 1:
+                    head_range.append(max_head_index - 1 - head_index)
+                head_range.append(head_index)
+                head_index -= 1
+        elif search_dir == 1:
+            # 从右向左搜索
+            searchPoints = np.arange(rBoundary + 1e-3, (lBoundary + rBoundary) / 2, -search_step)
+            head_range = list(range(max_head_index - 1, -1, -1))
         else:
-            point_head[i] = 5
-    # 假定初始位置
-    deport = slotf1_pos
-    deport[0] += 45 * slot_interval
-    saving = []
+            # 从左向右搜索
+            searchPoints = np.arange(lBoundary, (lBoundary + rBoundary) / 2, search_step)
+            head_range = list(range(max_head_index))
 
-    for i in individual:
-        for j in individual:
-            if i == j or point_head[i] == point_head[j]:
-                continue
-            # todo: 目前仅处理一种元件的情形
-            distance = cheby(deport, mount_point_pos[0][i]) + cheby(deport, mount_point_pos[0][j])
+        for startPoint in searchPoints:
+            tmp_placement_result, tmp_head_sequence_result = [], []
+            total_dist = 0
+            mount_point_pos_cpy, mount_point_index_cpy = copy.deepcopy(mount_point_pos), copy.deepcopy(mount_point_index)
+            for cycle_index, component_cycle in enumerate(component_assign):
+                for _ in range(cycle_assign[cycle_index]):
+                    assigned_placement = [-1] * max_head_index
+                    min_pos_x, max_pos_x = min(mount_point_pos_cpy, key=lambda x: x[0])[0], \
+                                           max(mount_point_pos_cpy, key=lambda x: x[0])[0]
+                    search_interval = min((max_pos_x - min_pos_x) / (max_head_index - 1), head_interval)
 
-            distance -= cheby(mount_point_pos[0][i], mount_point_pos[0][j],
-                              (point_head[j] - point_head[i]) * head_interval)
-            saving.append([i, j, distance])
+                    # 最近邻确定
+                    way_point = [startPoint, min(mount_point_pos_cpy, key=lambda x: x[1])[1]]
+                    point_index = -1
+                    for head_counter, head in enumerate(head_range):
+                        if head_counter == 0:
+                            unassigned_head = []
+                            for next_head in range(max_head_index):
+                                if assigned_placement[next_head] == -1 and component_assign[cycle_index][next_head] != -1:
+                                    unassigned_head.append(next_head)
 
-    saving = sorted(saving, key=lambda x: x[2], reverse=True)
-    routes, routes_head = [], []
-    for i in individual:
-        routes.append([i])
-        routes_head.append([point_head[i]])
+                            if len(unassigned_head) == 0:
+                                continue
 
-    for i in range(len(saving)):
-        start_route, end_route = [], []
-        start_route_head, end_route_head = [], []
-        for j in range(len(routes)):
-            if len(routes) == max_head_index:
-                continue
-            if saving[i][0] == routes[j][-1]:
-                end_route = routes[j]
-                end_route_head = routes_head[j]
-            elif saving[i][1] == routes[j][0]:
-                start_route = routes[j]
-                start_route_head = routes_head[j]
+                            if rBoundary < startPoint:
+                                head_index = unassigned_head[-1]
+                            else:
+                                head_index = unassigned_head[int(math.floor(
+                                    (startPoint - lBoundary) / (rBoundary - lBoundary) * len(unassigned_head)))]
 
-            # todo: 如何同元件分配对应？
-            if len(end_route) > 0 and len(start_route) > 0:
-                route_store = end_route + start_route
-                route_head_store = end_route_head + start_route_head
+                            component_index = component_assign[cycle_index][head_index]
+                            min_horizontal_distance = None
+                            for index, mount_index in enumerate(mount_point_index_cpy):
+                                if mount_point_part[mount_index] != component_index:
+                                    continue
+                                horizontal_distance = abs(mount_point_pos_cpy[index][0] - startPoint) + 1e-5 * abs(
+                                    mount_point_pos_cpy[index][1] - way_point[1])
 
-                if len(route_store) <= max_head_index and len(set(route_head_store)) == len(route_head_store):
+                                if min_horizontal_distance is None or horizontal_distance < min_horizontal_distance:
+                                    min_horizontal_distance = horizontal_distance
+                                    point_index = index
+                        else:
+                            head_index, point_index = -1, -1
+                            min_cheby_distance, min_euler_distance = float('inf'), float('inf')
+                            for next_head in range(max_head_index):
+                                next_comp_index = component_assign[cycle_index][next_head]
+                                if assigned_placement[next_head] != -1 or next_comp_index == -1:
+                                    continue
+                                for counter, mount_index in enumerate(mount_point_index_cpy):
+                                    if mount_point_part[mount_index] != next_comp_index:
+                                        continue
 
-                    start_idx = routes.index(start_route)
-                    end_index = routes.index(end_route)
+                                    if search_dir == 0:
+                                        delta_x = abs(mount_point_pos_cpy[counter][0] - way_point[0]
+                                                      + (max_head_index // 2 - 0.5 - next_head) * search_interval)
+                                    elif search_dir == 1:
+                                        delta_x = abs(mount_point_pos_cpy[counter][0] - way_point[0]
+                                                      + (max_head_index - next_head - 1) * search_interval)
+                                    else:
+                                        delta_x = abs(mount_point_pos_cpy[counter][0] - way_point[0]
+                                                      - next_head * search_interval)
+                                    delta_x = delta_x * 0.01
+                                    delta_y = abs(mount_point_pos_cpy[counter][1] - way_point[1])
 
-                    if start_idx < end_index:
-                        start_idx, end_index = end_index, start_idx
+                                    euler_distance = pow(axis_moving_time(delta_x, 0), 2) + pow(axis_moving_time(delta_y, 1), 2)
+                                    cheby_distance = max(axis_moving_time(delta_x, 0),
+                                                         axis_moving_time(delta_y, 1)) + 0.1 * euler_distance
 
-                    routes.pop(start_idx)
-                    routes.pop(end_index)
-                    routes.append(route_store)
+                                    if cheby_distance < min_cheby_distance or (
+                                            abs(cheby_distance - min_cheby_distance) < 1e-9
+                                            and euler_distance < min_euler_distance):
+                                        # if euler_distance < min_euler_distance:
+                                        min_cheby_distance, min_euler_distance = cheby_distance, euler_distance
+                                        head_index, point_index = next_head, counter
 
-                    routes_head.pop(start_idx)
-                    routes_head.pop(end_index)
-                    routes_head.append(route_head_store)
+                            if head_index == -1:
+                                continue
+                        assert point_index != -1
 
-                break
+                        assigned_placement[head_index] = mount_point_index_cpy[point_index]
+                        way_point = mount_point_pos_cpy[point_index]
 
-    for i in range(len(routes)):
-        if mount_point_pos[0][routes[i][0]][0] > mount_point_pos[0][routes[i][-1]][0]:
-            routes[i] = routes[i][::-1]
-            routes_head[i] = routes_head[i][::-1]
+                        mount_point_index_cpy.pop(point_index)
+                        mount_point_pos_cpy.pop(point_index)
 
-    val = 0
-    assigned_feeder = [45] * max_head_index
+                        if search_dir == 0:
+                            way_point[0] += (max_head_index // 2 - 0.5 - head_index) * search_interval
+                        elif search_dir == 1:
+                            way_point[0] += (max_head_index - head_index - 1) * search_interval
+                        else:
+                            way_point[0] -= head_index * search_interval
 
-    for idx_route, route in enumerate(routes):
+                    dist, head_seq = dynamic_programming_cycle_path(mount_point_pos, assigned_placement)
+
+                    total_dist += dist
+                    tmp_head_sequence_result.append(head_seq)
+                    tmp_placement_result.append(assigned_placement)  # 各个头上贴装的元件类型
+
+            if min_dist is None or total_dist < min_dist:
+                placement_result, head_sequence_result = tmp_placement_result, tmp_head_sequence_result
+                min_dist = total_dist
+
+    cycle_length, cycle_average_pos = [], []
+    for cycle, placement in enumerate(placement_result):
         prev_pos = None
-        cycle_placement = [-1 for _ in range(max_head_index)]
-
-        for idx, i in enumerate(route):
-            head = routes_head[idx_route][idx]
-            cycle_placement[head] = i
-
-        head_seq = dynamic_programming_cycle_path(pcb_data, cycle_placement, assigned_feeder)
-
-        for head in head_seq:
-            i = cycle_placement[head]
-            pos = mount_point_pos[0][i]
+        pos_list = []
+        movement = 0
+        for head in head_sequence_result[cycle]:
+            point_index = placement[head]
+            if point_index == -1:
+                continue
+            pos = mount_point_pos[point_index].copy()
             pos[0] -= head * head_interval
+            pos_list.append(pos)
             if prev_pos is not None:
-                val += cheby(prev_pos, pos)
+                movement += max(abs(prev_pos[0] - pos[0]), abs(prev_pos[1] - pos[1]))
             prev_pos = pos
 
-    print('route value:', val)
-    return val, routes, routes_head
+        cycle_average_pos.append([sum(map(lambda pos: pos[0], pos_list)) / len(pos_list),
+                                  sum(map(lambda pos: pos[1], pos_list)) / len(pos_list)])
+        cycle_length.append(movement)
 
+    best_placement_result, best_head_sequence_result = copy.deepcopy(placement_result), copy.deepcopy(
+        head_sequence_result)
 
-# ======================== 聚类相关 ========================
-# 两点距离
-def distance(e1, e2):
-    return np.sqrt((e1[0]-e2[0])**2+(e1[1]-e2[1])**2)
+    best_cycle_length, best_cycle_average_pos = cycle_length.copy(), copy.deepcopy(cycle_average_pos)
+    # todo: 随机生成的点测试
+    # todo: dfs提速
 
+    def dfs(step, dist, point_assign, head_assign):
+        nonlocal min_dist
+        nonlocal point_assign_res, head_assign_res
+        if min_dist is not None and dist > min_dist:
+            return
 
-# 集合中心
-def means(arr):
-    return np.array([np.mean([e[0] for e in arr]), np.mean([e[1] for e in arr])])
+        if step == len(point_list):
+            if min_dist is None or dist < min_dist:
+                point_assign_res, head_assign_res = point_assign.copy(), head_assign.copy()
+                min_dist = dist
+            return
 
+        for _head in range(max_head_index):
+            if head_component[_head] == -1 or _head in head_assign:
+                continue
 
-# arr中距离a最远的元素，用于初始化聚类中心
-def farthest(k_arr, arr):
-    f = None
-    max_d = 0
-    for e in arr:
-        d = 0
-        for i in range(k_arr.__len__()):
-            d = d + np.sqrt(distance(k_arr[i], e))
-        if d > max_d:
-            max_d = d
-            f = e
-    return f
+            head_assign.append(_head)
+            for _point in point_list:
+                if head_component[_head] != mount_point_part[_point] or _point in point_assign:
+                    continue
+                point_assign.append(_point)
+                if len(point_assign) >= 2:
+                    _delta_x = mount_point_pos[point_assign[-1]][0] - head_assign[-1] * head_interval - \
+                              mount_point_pos[point_assign[-2]][0] + head_assign[-2] * head_interval
+                    _delta_y = mount_point_pos[point_assign[-1]][1] - mount_point_pos[point_assign[-1]][1]
+                else:
+                    _delta_x, _delta_y = 0, 0
+                dfs(step + 1, dist + max(abs(_delta_x), abs(_delta_y)), point_assign, head_assign)
+                point_assign.pop(-1)
+            head_assign.pop(-1)
+        return
 
+    n_generation = 300
+    with tqdm(total=n_generation) as pbar:
+        pbar.set_description('swap heuristic process')
 
-# arr中距离a最近的元素，用于聚类
-def closest(a, arr):
-    c = arr[1]
-    min_d = distance(a, arr[1])
-    arr = arr[1:]
-    for e in arr:
-        d = distance(a, e)
-        if d < min_d:
-            min_d = d
-            c = e
-    return c
+        for _ in range(n_generation):
+            # print('current generation:  ', n_generation, ', current total length :  ', sum(best_cycle_length))
 
+            placement_result, head_sequence_result = copy.deepcopy(best_placement_result), copy.deepcopy(
+                    best_head_sequence_result)
+            cycle_length = best_cycle_length.copy()
+            cycle_average_pos = copy.deepcopy(best_cycle_average_pos)
 
-def cal_individual_cluster_val(pcb_data, individual, component_assign, feeder_slot_assign):
-    head_div = 7
-    # todo: 单一元件贴装点数较多时的处理，多种类型元件的编码方式
-    mount_pos = []
-    for idx, point in enumerate(individual):
-        mount_pos.append(
-            [pcb_data.iloc[point]['x'] - (idx // head_div) * head_interval, pcb_data.iloc[point]['y'], idx // head_div,
-             point])
+            cycle_index = roulette_wheel_selection(cycle_length)        # 根据周期加权移动距离随机选择周期
 
-    # 簇的数量
-    m = head_div
+            point_dist = []
+            for head in head_sequence_result[cycle_index]:
+                point_index = placement_result[cycle_index][head]
+                point_dist.append(
+                    max(abs(mount_point_pos[point_index][0] - head * head_interval - cycle_average_pos[cycle_index][0]),
+                        abs(mount_point_pos[point_index][1] - cycle_average_pos[cycle_index][1])))
 
-    # 随机选一个点放入
-    r = np.random.randint(len(mount_pos) - 1)
-    k_arr = np.array([[mount_pos[r][0], mount_pos[r][1]]])
+            max_point_dist = max(point_dist)
+            for i, dist in enumerate(point_dist):
+                point_dist[i] = 2 * max_point_dist - dist
 
-    # 按照距离最远的原则，再选m-1个点放入
-    cla_arr = [[]]
-    for i in range(m-1):
-        k = farthest(k_arr, mount_pos)
-        k_arr = np.concatenate([k_arr, np.array([[k[0], k[1]]])])
-        cla_arr.append([])
+            # 随机选择一个异常点
+            head_index = head_sequence_result[cycle_index][roulette_wheel_selection(point_dist)]
+            point_index = placement_result[cycle_index][head_index]
 
-    # 迭代聚类
-    n = 10                      # todo: 此处暂时设定为该值，单次运行时间结果为3s，时长仍需压缩
-    cla_temp = cla_arr
-    cla_head = [[] for _ in range(m)]
-    for i in range(n):    # 迭代n次
-        for e in mount_pos:    # 把集合里每一个元素聚到最近的类
-            ki = -1        # 假定距离第一个中心最近
-            min_d = 100000000
-            for j in range(k_arr.__len__()):
-                # 找到更近的聚类中心
-                if cla_temp[j].__len__() < max_head_index and e[2] not in cla_head[j] and distance(e, k_arr[j]) < min_d:
-                    min_d = distance(e, k_arr[j])
-                    ki = j
-            cla_temp[ki].append(e)
-            cla_head[ki].append(e[2])
+            # 找距离该异常点最近的周期
+            min_dist = None
+            chg_cycle_index = -1
+            for idx in range(len(cycle_average_pos)):
+                if idx == cycle_index:
+                    continue
+                dist_ = 0
+                for head in head_sequence_result[idx]:
+                    dist_ += max(abs(mount_point_pos[placement_result[idx][head]][0] - mount_point_pos[point_index][0]),
+                                 abs(mount_point_pos[placement_result[idx][head]][1] - mount_point_pos[point_index][1]))
 
-        # 迭代更新聚类中心
-        for k in range(k_arr.__len__()):
-            if n - 1 == i:
-                break
-            k_arr[k] = means(cla_temp[k])
-            cla_temp[k] = []
-            cla_head[k] = []
+                if min_dist is None or dist_ < min_dist:
+                    min_dist = dist_
+                    chg_cycle_index = idx
 
-    val = 0
-    for cluster in cla_temp:
-        prev_pos = None
-        for item in cluster:
-            pos = [item[0], item[1]]
-            if prev_pos is not None:
-                val += cheby(prev_pos, pos)
-            prev_pos = pos
-    return val, cla_temp
+            assert chg_cycle_index != -1
 
+            chg_head, min_chg_dist = None, None
+            chg_cycle_point = []
+            for head in head_sequence_result[chg_cycle_index]:
+                index = placement_result[chg_cycle_index][head]
+                chg_cycle_point.append([mount_point_pos[index][0] - head * head_interval, mount_point_pos[index][1]])
 
-def genetic_based_placement_route_schedule(component_data, pcb_data, component_assign, feeder_slot_assign):
-    # basic parameter
-    # crossover rate & mutation rate: 80% & 10%
-    # population size: 30
-    # the number of generation: 100
-    crossover_rate, mutation_rate = 0.6, 0.2
-    population_size, n_generations = 50, 300
+            for idx, head in enumerate(head_sequence_result[chg_cycle_index]):
+                chg_cycle_point_cpy = copy.deepcopy(chg_cycle_point)
+                index = placement_result[chg_cycle_index][head]
+                chg_cycle_point_cpy[idx][0] = mount_point_pos[index][0] - head * head_interval
 
-    with tqdm(total=n_generations) as pbar:
-        pbar.set_description('ILP genetic process')
+                chg_dist = 0
+                aver_chg_pos = [sum(map(lambda x: x[0], chg_cycle_point_cpy)) / len(chg_cycle_point_cpy),
+                                sum(map(lambda x: x[1], chg_cycle_point_cpy)) / len(chg_cycle_point_cpy)]
 
-        # initial solution
-        population, pop_val, pop_cluster = [], [], []
-        for _ in range(population_size):
-            pop_permutation = list_range(len(pcb_data))
-            random.shuffle(pop_permutation)
-            population.append(pop_permutation)
+                for pos in chg_cycle_point_cpy:
+                    chg_dist += max(abs(aver_chg_pos[0] - pos[0]), abs(aver_chg_pos[1] - pos[1]))
 
-            # calculate fitness value
-            val, cluster = cal_individual_cluster_val(pcb_data, pop_permutation, component_assign, feeder_slot_assign)
-            pop_val.append(val)
-            pop_cluster.append(cluster)
+                # 更换后各点距离中心更近
+                if min_chg_dist is None or chg_dist < min_chg_dist:
+                    chg_head = head
+                    min_chg_dist = chg_dist
 
-        best_pop_val = []
-        for _ in range(n_generations):
-            pop_index = np.argmin(pop_val)
-            best_pop_val.append(min(pop_val))
+            assert chg_head is not None
 
-            best_cluster = pop_cluster[pop_index]
-            print('current best value', best_pop_val[-1])
-            # min-max convert
-            max_val = 1.5 * max(pop_val)
-            sel_pop_val = list(map(lambda v: max_val - v, pop_val))
+            tmp_chg_placement_res, tmp_chg_head_res = placement_result[chg_cycle_index].copy(), head_sequence_result[
+                chg_cycle_index].copy()
+            tmp_chg_placement_res[chg_head] = point_index
+            point_list, head_component = [], [-1 for _ in range(max_head_index)]
+            for head, point in enumerate(tmp_chg_placement_res):
+                if point == -1:
+                    continue
+                point_list.append(point)
+                head_component[head] = mount_point_part[point]
 
-            # crossover and mutation
-            new_population, new_pop_val, new_pop_cluster = [], [], []
-            for pop in range(population_size):
-                if pop % 2 == 0 and random.random() < crossover_rate:
-                    index1, index2 = roulette_wheel_selection(sel_pop_val), -1
-                    while True:
-                        index2 = roulette_wheel_selection(sel_pop_val)
-                        if index1 != index2:
-                            break
+            point_assign_res, head_assign_res = [], []
+            min_dist = None
 
-                    # 两点交叉算子
-                    offspring1, offspring2 = partially_mapped_crossover(population[index1], population[index2])
+            dfs(0, 0, [], [])
+            prev_pos = None
+            tmp_chg_moving = 0
+            for idx, head in enumerate(head_assign_res):
+                tmp_chg_placement_res[head] = point_assign_res[idx]
+                pos = mount_point_pos[point_assign_res[idx]].copy()
+                pos[0] -= head * head_interval
+                if prev_pos is not None:
+                    tmp_chg_moving += max(abs(prev_pos[0] - pos[0]), abs(prev_pos[1] - pos[1]))
+                prev_pos = pos
 
-                    if np.random.random() < mutation_rate:
-                        swap_mutation(offspring1)
+            tmp_chg_head_res = head_assign_res.copy()
 
-                    if np.random.random() < mutation_rate:
-                        swap_mutation(offspring2)
+            # 同样的方案重复一次
+            tmp_placement_res, tmp_place_head_res = placement_result[cycle_index].copy(), head_sequence_result[
+                cycle_index].copy()
+            tmp_placement_res[head_index] = placement_result[chg_cycle_index][chg_head]
 
-                    new_population.append(offspring1)
-                    new_population.append(offspring2)
+            point_list, head_component = [], [-1 for _ in range(max_head_index)]
+            for head, point in enumerate(tmp_placement_res):
+                if point == -1:
+                    continue
+                point_list.append(point)
+                head_component[head] = mount_point_part[point]
 
-                    val, cluster = cal_individual_cluster_val(pcb_data, offspring1, component_assign, feeder_slot_assign)
-                    new_pop_val.append(val)
-                    new_pop_cluster.append(cluster)
+            point_assign_res, head_assign_res = [], []
+            min_dist = None
 
-                    val, cluster = cal_individual_cluster_val(pcb_data, offspring2, component_assign, feeder_slot_assign)
-                    new_pop_val.append(val)
-                    new_pop_cluster.append(cluster)
+            dfs(0, 0, [], [])
+            prev_pos = None
+            tmp_place_moving = 0
+            tmp_placement_res = [-1 for _ in range(max_head_index)]
+            for idx, head in enumerate(head_assign_res):
+                tmp_placement_res[head] = point_assign_res[idx]
+                pos = mount_point_pos[point_assign_res[idx]].copy()
+                pos[0] -= head * head_interval
+                if prev_pos is not None:
+                    tmp_place_moving += max(abs(prev_pos[0] - pos[0]), abs(prev_pos[1] - pos[1]))
+                prev_pos = pos
+            tmp_place_head_res = head_assign_res.copy()
 
-            # selection
-            top_k_index = get_top_k_value(pop_val, population_size - len(new_population), reverse=False)
-            for index in top_k_index:
-                new_population.append(population[index])
-                new_pop_val.append(pop_val[index])
-                new_pop_cluster.append(pop_cluster[index])
+            # 更新贴装顺序分配结果
+            placement_result[cycle_index] = tmp_placement_res
+            placement_result[chg_cycle_index] = tmp_chg_placement_res
 
-            population, pop_val, pop_cluster = new_population, new_pop_val, new_pop_cluster
+            head_sequence_result[cycle_index] = tmp_place_head_res
+            head_sequence_result[chg_cycle_index] = tmp_chg_head_res
+
+            # 更新移动路径
+            cycle_length[cycle_index], cycle_length[chg_cycle_index] = tmp_place_moving, tmp_chg_moving
+
+            # 更新平均坐标和最大偏离点索引
+            point_list, point_index_list = [], []
+            for head in head_sequence_result[cycle_index]:
+                point_index_list.append(tmp_placement_res[head])
+                point_pos = mount_point_pos[point_index_list[-1]].copy()
+                point_pos[0] -= head * head_interval
+                point_list.append(point_pos)
+
+            cycle_average_pos[cycle_index] = [sum(map(lambda x: x[0], point_list)) / len(point_list),
+                                              sum(map(lambda x: x[1], point_list)) / len(point_list)]
+
+            point_list, point_index_list = [], []
+            for head in head_sequence_result[chg_cycle_index]:
+                point_index_list.append(tmp_chg_placement_res[head])
+                point_pos = mount_point_pos[point_index_list[-1]].copy()
+                point_pos[0] -= head * head_interval
+                point_list.append(point_pos)
+
+            cycle_average_pos[chg_cycle_index] = [sum(map(lambda x: x[0], point_list)) / len(point_list),
+                                                  sum(map(lambda x: x[1], point_list)) / len(point_list)]
+
+            if sum(cycle_length) < sum(best_cycle_length):
+                best_cycle_length = cycle_length.copy()
+                best_cycle_average_pos = copy.deepcopy(cycle_average_pos)
+                best_placement_result, best_head_sequence_result = copy.deepcopy(placement_result), copy.deepcopy(
+                    head_sequence_result)
+
             pbar.update(1)
-
-        # print('best cluster: ', best_cluster)
-        assigned_feeder = [45] * max_head_index
-        placement_result, head_sequence_result = [], []
-        for cluster in best_cluster:        # 四元组，分别为（X, Y, HD, IDX）
-            cycle_placement = [-1 for _ in range(max_head_index)]
-            for item in cluster:
-                cycle_placement[item[2]] = item[3]
-
-            placement_result.append(cycle_placement)
-            head_sequence_result.append(dynamic_programming_cycle_path(pcb_data, cycle_placement, assigned_feeder))
-
-    return placement_result, head_sequence_result
+    return best_placement_result, best_head_sequence_result
 
 
-def route_saving_generation(component_data, pcb_data, component_assign, feeder_assign):
-    placement_result, head_sequence_result = [], []
-    mount_point_index = [[] for _ in range(len(component_data))]
-    mount_point_pos = [[] for _ in range(len(component_data))]
-    for i in range(len(pcb_data)):
-        part = pcb_data.loc[i]['part']
-        component_index = component_data[component_data['part'] == part].index.tolist()[0]
-        # 记录贴装点序号索引和对应的位置坐标
-        mount_point_index[component_index].append(i)
-        mount_point_pos[component_index].append([pcb_data.loc[i]['x'], pcb_data.loc[i]['y']])
-
-    # 假定初始位置
-    deport = slotf1_pos
-    deport[0] += 45 * slot_interval
-    saving = []
-    n = len(pcb_data)
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            # todo: 目前仅处理一种元件的情形
-            dist = eular(deport, mount_point_pos[0][i]) + eular(deport, mount_point_pos[0][j])
-            dist -= eular(mount_point_pos[0][i], mount_point_pos[0][j], 30)
-            saving.append([i, j, dist])
-
-    saving = sorted(saving, key=lambda x: x[2], reverse=True)
-
-    routes = []
-    for i in range(n):
-        routes.append([i])
-
-    for i in range(len(saving)):
-        start_route, end_route = [], []
-        for j in range(len(routes)):
-            if saving[i][0] == routes[j][-1]:
-                end_route = routes[j]
-            elif saving[i][1] == routes[j][0]:
-                start_route = routes[j]
-
-            if len(end_route) > 0 and len(start_route) > 0:
-                route_store = end_route + start_route
-
-                if len(route_store) <= max_head_index:
-                    routes.remove(start_route)
-                    routes.remove(end_route)
-                    routes.append(route_store)
-                break
-    for i in range(len(routes)):
-        if mount_point_pos[0][routes[i][0]][0] > mount_point_pos[0][routes[i][-1]][0]:
-            routes[i] = routes[i][::-1]
-
-    val = 0
-    for idx_route, route in enumerate(routes):
-        prev_pos = None
-        for head, i in enumerate(route):
-            pos = mount_point_pos[0][i]
-            pos[0] -= head * head_interval
-            if prev_pos is not None:
-                val += cheby(prev_pos, pos)
-            prev_pos = pos
-
-    index_mount = set()
-    for route in routes:
-        pos_x, pos_y = [], []
-        for index, data in pcb_data.iterrows():
-            if index in index_mount:
-                continue
-            pos_x.append(data['x'])
-            pos_y.append(data['y'])
-
-        mount_pos = []
-        for head in range(len(route)):
-            index = route[head]
-            index_mount.add(index)
-
-            x, y = pcb_data.iloc[index]['x'], pcb_data.iloc[index]['y']
-            plt.text(x, y + 0.1, 'HD%d' % (head + 1), ha='center', va='bottom', size=10)
-            plt.plot([x, x - head * head_interval], [y, y], linestyle='-.', color='black', linewidth=1)
-            mount_pos.append([x - head * head_interval, y])
-            plt.plot(mount_pos[-1][0], mount_pos[-1][1], marker='^', color='red', markerfacecolor='white')
-
-        plt.scatter(pos_x, pos_y, s=8)
-        # 绘制贴装路径
-        for i in range(len(mount_pos) - 1):
-            plt.plot([mount_pos[i][0], mount_pos[i + 1][0]], [mount_pos[i][1], mount_pos[i + 1][1]], color='blue',
-                     linewidth=1)
-        plt.show()
-
-    return placement_result, head_sequence_result
-
-
-def placement_route_schedule(component_data, pcb_data, component_assign, feeder_assign):
-    placement_result, head_sequence_result = [], []
-
-    return placement_result, head_sequence_result
-
-
-def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_assign, feeder_assign, placement_result,
-                            head_sequence, hinter=True):
+def placement_time_estimate(component_data, pcb_data, component_assign, feeder_assign, cycle_assign,
+                            placement_result, head_sequence, hinter=True):
     # === 校验 ===
     total_points = 0
-    for _, component_cycle in component_assign.iterrows():
+    for cycle_index, component_cycle in enumerate(component_assign):
         for head in range(max_head_index):
-            if component_cycle['H' + str(head + 1)] == '':
+            if component_cycle[head] == -1:
                 continue
-            total_points += component_cycle['cycle']
+            total_points += cycle_assign[cycle_index]
 
     if total_points != len(pcb_data):
         warning_info = 'the number of placement points is not match with the PCB data. '
@@ -1218,20 +952,19 @@ def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_a
         return 0., (0, 0, 0)
 
     feeder_arrangement = defaultdict(set)
-    for cycle_index, feeder_slots in feeder_assign.iterrows():
+    for cycle_index, feeder_slots in enumerate(feeder_assign):
         for head in range(max_head_index):
-            slot = feeder_slots['H' + str(head + 1)]
-            if slot == '':
+            slot = feeder_slots[head]
+            if slot == -1:
                 continue
-            part = component_assign.iloc[cycle_index]['H' + str(head + 1)]
-            component_index = component_data[component_data['part'] == part].index.tolist()[0]
-            feeder_arrangement[component_index].add(int(slot[1:]))
+            component_index = component_assign[cycle_index][head]
+            feeder_arrangement[component_index].add(slot)
 
-    for part, data in component_data.iterrows():
-        if part in feeder_arrangement.keys() and data['feeder-limit'] < len(feeder_arrangement[part]):
-            info = 'the number of arranged feeder of [' + data['part'] + '] exceeds the quantity limit'
-            warnings.warn(info, UserWarning)
-            return 0., (0, 0, 0)
+    # for part, data in component_data.iterrows():
+    #     if part in feeder_arrangement.keys() and data['feeder-limit'] < len(feeder_arrangement[part]):
+    #         info = 'the number of arranged feeder of [' + data['part'] + '] exceeds the quantity limit'
+    #         warnings.warn(info, UserWarning)
+    #         return 0., (0, 0, 0)
 
     total_moving_time = .0                          # 总移动用时
     total_operation_time = .0                       # 操作用时
@@ -1243,23 +976,27 @@ def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_a
 
     # 初始化首个周期的吸嘴装配信息
 
-    nozzle_assigned = [nozzle_assign.iloc[0]['H' + str(h + 1)] for h in range(max_head_index)]
+    nozzle_assigned = ['' for _ in range(max_head_index)]
+    for head in range(max_head_index):
+        if component_assign[0][head] == -1:
+            continue
+        nozzle_assigned[head] = component_data.iloc[component_assign[0][head]]['nz']
     cycle = -1
-    for cycle_set, component_cycle in component_assign.iterrows():
-        for _ in range(int(component_cycle['cycle'])):
+    for cycle_index, component_cycle in enumerate(component_assign):
+        for _ in range(cycle_assign[cycle_index]):
             cycle += 1
             pick_slot, mount_pos, mount_angle = [], [], []
             nozzle_pick_counter, nozzle_put_counter = 0, 0  # 吸嘴更换次数统计（拾取/放置分别算一次）
             for head in range(max_head_index):
-                slot = feeder_assign.iloc[cycle_set]['H' + str(head + 1)]
-                if slot != '':
-                    pick_slot.append(int(slot[1:]) - head)
+                slot = feeder_assign[cycle_index][head]
+                if slot != -1:
+                    pick_slot.append(slot - head)
 
-                if component_cycle['H' + str(head + 1)] == '':
+                if component_cycle[head] == -1:
                     continue
-                nozzle = nozzle_assign.iloc[cycle_set]['H' + str(head + 1)]
+                nozzle = component_data.iloc[component_cycle[head]]['nz']
                 if nozzle != nozzle_assigned[head]:
-                    if nozzle_assigned[head] != 'Empty':
+                    if nozzle_assigned[head] != '':
                         nozzle_put_counter += 1
                     nozzle_pick_counter += 1
                     nozzle_assigned[head] = nozzle
@@ -1300,7 +1037,7 @@ def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_a
                     total_pick_distance += max(abs(cur_pos[0] - next_pos[0]), abs(cur_pos[1] - next_pos[1]))
                 cur_pos = next_pos
 
-            # todo: 省略了固定相机检测过程
+            # 省略了固定相机检测过程
             # 单独计算贴装路径
             for cntPoints in range(len(mount_pos) - 1):
                 total_mount_distance += max(abs(mount_pos[cntPoints][0] - mount_pos[cntPoints + 1][0]),
@@ -1323,11 +1060,7 @@ def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_a
     millisecond = int((total_time - minutes * 60 - seconds) * 60)
 
     if hinter:
-        total_cycle = 0
-        for _, component_cycle in component_assign.iterrows():
-            total_cycle += component_cycle['cycle']
-
-        print('-Cycle counter: {}'.format(total_cycle))
+        print('-Cycle counter: {}'.format(sum(cycle_assign)))
         print('-Nozzle change counter: {}'.format(total_nozzle_change_counter // 2))
         print('-Pick operation counter: {}'.format(total_pick_counter))
 
@@ -1347,11 +1080,67 @@ def placement_time_estimate(component_data, pcb_data, nozzle_assign, component_a
     return total_time
 
 
+# 将步骤列表中已有的数据转换为可计算格式
+def convert_pcbdata_to_result(pcb_data, component_data):
+    nozzle_result, component_result, cycle_result, feeder_slot_result = [], [], [], []
+    placement_result, head_sequence_result = [], []
+
+    assigned_part = [-1 for _ in range(max_head_index)]
+    assigned_slot = [-1 for _ in range(max_head_index)]
+    assigned_point = [-1 for _ in range(max_head_index)]
+    assigned_sequence = []
+
+    point_num = len(pcb_data)           # total mount points num
+    for point_cnt in range(point_num + 1):
+
+        cycle_start = 1 if point_cnt == point_num else pcb_data.loc[point_cnt, 'cs']
+        if (cycle_start and point_cnt != 0) or  -1 not in assigned_part:
+
+            if len(component_result) != 0 and component_result[-1] == assigned_part:
+                cycle_result[-1] += 1
+            else:
+                component_result.append(assigned_part)
+                feeder_slot_result.append(assigned_slot)
+                cycle_result.append(1)
+
+            assigned_sequence = list(reversed(assigned_sequence))       # Samsung拾取顺序相反
+
+            placement_result.append(assigned_point)
+            head_sequence_result.append(assigned_sequence)
+
+            assigned_part = [-1 for _ in range(max_head_index)]
+            assigned_slot = [-1 for _ in range(max_head_index)]
+            assigned_point = [-1 for _ in range(max_head_index)]
+            assigned_sequence = []
+
+            if point_cnt == point_num:
+                break
+
+        slot = pcb_data.loc[point_cnt, 'fdr'].split(' ')[0]
+        if slot == 'A':
+            slot, part = 0, pcb_data.loc[point_cnt, 'part']
+        else:
+
+            slot, part = int(slot[1:]), pcb_data.loc[point_cnt, 'fdr'].split(' ', 1)[1]
+        head = pcb_data.loc[point_cnt, 'hd'] - 1
+
+        part_index = component_data[component_data['part'] == part].index.tolist()[0]
+
+        assigned_part[head] = part_index
+        assigned_slot[head] = slot
+        assigned_point[head] = point_cnt
+        assigned_sequence.append(head)
+
+    return component_result, feeder_slot_result, cycle_result, placement_result, head_sequence_result
+
+
 @timer_wrapper
 def main():
     parser = argparse.ArgumentParser(description='integer programming optimizer implementation')
     parser.add_argument('--filename', default='PCB.txt', type=str, help='load pcb data')
     parser.add_argument('--auto_register', default=1, type=int, help='register the component according the pcb data')
+    parser.add_argument('--mode', default=1, type=int, help='mode: 0 -directly load pcb data without optimization '
+                                                            'for data analysis, 1 -optimize pcb data')
     params = parser.parse_args()
 
     # 结果输出显示所有行和列
@@ -1359,21 +1148,24 @@ def main():
     pd.set_option('display.max_rows', None)
 
     # 加载PCB数据
-    pcb_data, component_data, _ = load_data(params.filename, feeder_limit=1, auto_register=params.auto_register)
+    pcb_data, component_data = load_data(params.filename, feeder_limit=1, auto_register=params.auto_register)
 
-    _, nozzle_assign, component_assign, feeder_assign = gurobi_optimizer(pcb_data, component_data, feeder_data=None,
-                                                                         initial=True, hinter=True)
+    if params.mode == 0:
+        component_assign, feeder_assign, cycle_assign, placement_assign, head_sequence_assign = convert_pcbdata_to_result(
+            pcb_data, component_data)
+    else:
+        _, component_assign, feeder_assign, cycle_assign = gurobi_optimizer(pcb_data, component_data, feeder_data=None,
+                                                                            initial=True, hinter=True)
 
-    placement_assign, head_sequence_assign = genetic_based_placement_route_schedule(component_data, pcb_data,
-                                                                                    component_assign, feeder_assign)
+        # placement_assign, head_sequence_assign = greedy_placement_route_generation(component_data, pcb_data,
+        #                                                                            component_assign, feeder_assign,
+        #                                                                            cycle_assign)
 
-    # placement_assign, head_sequence_assign = greedy_placement_route_generation(component_data, pcb_data,
-    #                                                                            component_assign, feeder_assign)
+        placement_assign, head_sequence_assign = scan_based_placement_route_generation(component_data, pcb_data,
+                                                                                       component_assign, feeder_assign,
+                                                                                       cycle_assign)
 
-    # placement_assign, head_sequence_assign = placement_route_schedule(component_data, pcb_data, component_assign,
-    #                                                                   feeder_assign)
-
-    placement_time_estimate(component_data, pcb_data, nozzle_assign, component_assign, feeder_assign, placement_assign,
+    placement_time_estimate(component_data, pcb_data, component_assign, feeder_assign, cycle_assign, placement_assign,
                             head_sequence_assign)
 
     index_mount = set()
@@ -1393,18 +1185,26 @@ def main():
             if cycle_index < cycle_show:
                 continue
             x, y = pcb_data.iloc[index]['x'], pcb_data.iloc[index]['y']
+
+            plt.figure(cycle_index)
             plt.text(x, y + 0.1, 'HD%d' % (head + 1), ha='center', va='bottom', size=10)
             # plt.plot([x, x - head * head_interval], [y, y], linestyle='-.', color='black', linewidth=1)
+            plt.plot([x, x], [y, y + 0.1], linestyle='-.', color='black', linewidth=1)
             mount_pos.append([x - head * head_interval, y])
             plt.plot(mount_pos[-1][0], mount_pos[-1][1], marker='^', color='red', markerfacecolor='white')
 
         if cycle_index < cycle_show:
             continue
         plt.scatter(pos_x, pos_y, s=8)
+        moving = 0
         # 绘制贴装路径
         for i in range(len(mount_pos) - 1):
             plt.plot([mount_pos[i][0], mount_pos[i + 1][0]], [mount_pos[i][1], mount_pos[i + 1][1]], color='blue',
                      linewidth=1)
+            moving += max(abs(mount_pos[i][0] - mount_pos[i + 1][0]), abs(mount_pos[i][1] - mount_pos[i + 1][1]))
+        plt.title(str(moving))
+        # plt.xlim((-30, 200))
+
         plt.show()
 
     # genetic_algorithm(pcb_data, component_data)
