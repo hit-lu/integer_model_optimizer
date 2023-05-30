@@ -78,24 +78,30 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
     # data preparation: convert data to index
     component_list, nozzle_list = defaultdict(int), defaultdict(int)
     cpidx_2_part, nzidx_2_nozzle, cpidx_2_nzidx = {}, {}, {}
+
+    average_pos = sum(map(lambda data: data[1]['x'], pcb_data.iterrows())) / len(pcb_data)
+    slot_start = int(round(average_pos / len(pcb_data) + stopper_pos[0] - slotf1_pos[0]) / slot_interval) + 1
+
+    for idx, data in component_data.iterrows():
+        part, nozzle = data['part'], data['nz']
+
+        cpidx_2_part[idx] = part
+        nz_key = [key for key, val in nzidx_2_nozzle.items() if val == nozzle]
+
+        nz_idx = len(nzidx_2_nozzle) if len(nz_key) == 0 else nz_key[0]
+        nzidx_2_nozzle[nz_idx] = nozzle
+
+        component_list[part] = 0
+        cpidx_2_nzidx[idx] = nz_idx
+
     for _, data in pcb_data.iterrows():
         part = data['part']
-        if part not in cpidx_2_part.values():
-            cpidx_2_part[len(cpidx_2_part)] = part
-
-        component_list[part] += 1
 
         idx = component_data[component_data['part'] == part].index.tolist()[0]
         nozzle = component_data.loc[idx]['nz']
-        if nozzle not in nzidx_2_nozzle.values():
-            nzidx_2_nozzle[len(nzidx_2_nozzle)] = nozzle
-        nozzle_list[nozzle] += 1
 
-        for cp_idx, part_ in cpidx_2_part.items():
-            for nz_idx, nozzle_ in nzidx_2_nozzle.items():
-                if part == part_ and nozzle == nozzle_:
-                    cpidx_2_nzidx[cp_idx] = nz_idx
-                    break
+        nozzle_list[nozzle] += 1
+        component_list[part] += 1
 
     part_feederbase = defaultdict(int)
     if feeder_data:
@@ -381,7 +387,6 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
             for h in range(max_head_index):
                 for i in range(I):
                     if abs(y[i, h, l].x - 1) < 1e-10:
-                        assigned = True
                         component_assign[-1][h] = i
 
                         for j in range(J):
@@ -389,8 +394,8 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
                                 nozzle_assign[-1][h] = j
 
                 for s in range(S):
-                    if abs(w[s, h, l].x - 1) < 1e-10:
-                        feeder_assign[-1][h] = s
+                    if abs(w[s, h, l].x - 1) < 1e-10 and component_assign[-1][h] != -1:
+                        feeder_assign[-1][h] = slot_start + s * interval_ratio - 1
 
         if hinter:
             print('total cost = {}'.format(mdl.objval))
@@ -404,10 +409,10 @@ def gurobi_optimizer(pcb_data, component_data, feeder_data, initial=False, hinte
 
             print('')
             print('result')
-            print(nozzle_assign)
-            print(component_assign)
-            print(feeder_assign)
-            print(cycle_assign)
+            print('nozzle assignment: ', nozzle_assign)
+            print('component assignment: ', component_assign)
+            print('feeder assignment: ', feeder_assign)
+            print('cycle assignment: ', cycle_assign)
 
     return mdl, component_assign, feeder_assign, cycle_assign
 
@@ -555,14 +560,8 @@ def greedy_placement_route_generation(component_data, pcb_data, component_result
 
 
 @timer_wrapper
-def scan_based_placement_route_generation(component_data, pcb_data, component_assign, feeder_assign, cycle_assign):
+def scan_based_placement_route_generation(component_data, pcb_data, component_assign, cycle_assign):
     placement_result, head_sequence_result = [], []
-
-    for row, feeders in enumerate(feeder_assign):
-        for col, feeder in enumerate(feeders):
-            if feeder == -1:
-                continue
-            feeder_assign[row][col] = 40
 
     mount_point_pos, mount_point_index, mount_point_part = [], [], []
     for i in range(len(pcb_data)):
@@ -674,6 +673,7 @@ def scan_based_placement_route_generation(component_data, pcb_data, component_as
 
                             if head_index == -1:
                                 continue
+
                         assert point_index != -1
 
                         assigned_placement[head_index] = mount_point_index_cpy[point_index]
@@ -1162,8 +1162,7 @@ def main():
         #                                                                            cycle_assign)
 
         placement_assign, head_sequence_assign = scan_based_placement_route_generation(component_data, pcb_data,
-                                                                                       component_assign, feeder_assign,
-                                                                                       cycle_assign)
+                                                                                       component_assign, cycle_assign)
 
     placement_time_estimate(component_data, pcb_data, component_assign, feeder_assign, cycle_assign, placement_assign,
                             head_sequence_assign)
@@ -1206,8 +1205,6 @@ def main():
         # plt.xlim((-30, 200))
 
         plt.show()
-
-    # genetic_algorithm(pcb_data, component_data)
 
 
 if __name__ == '__main__':
